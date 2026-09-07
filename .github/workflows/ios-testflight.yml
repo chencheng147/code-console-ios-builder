@@ -24,6 +24,9 @@ jobs:
     timeout-minutes: 180
 
     steps:
+      - name: Checkout builder scripts
+        uses: actions/checkout@v4
+
       - name: Validate required secrets
         env:
           SOURCE_REPO_URL: ${{ secrets.SOURCE_REPO_URL }}
@@ -47,24 +50,9 @@ jobs:
           SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
-          # Supports https://github.com/org/repo.git or https://gitee.com/org/repo.git
-          auth_url="$(python3 - <<'PY'
-          import os
-          from urllib.parse import quote, urlsplit, urlunsplit
-          raw = os.environ["SOURCE_REPO_URL"].strip()
-          token = os.environ["SOURCE_REPO_TOKEN"].strip()
-          parts = urlsplit(raw)
-          if parts.scheme not in ("http", "https") or not parts.netloc or not parts.path:
-              raise SystemExit("SOURCE_REPO_URL must be an https git URL")
-          host = parts.netloc.lower()
-          # Gitee rejects GitHub's x-access-token username ("The token username invalid").
-          user = "oauth2" if host.endswith("gitee.com") else "x-access-token"
-          netloc = f"{user}:{quote(token, safe='')}@{parts.netloc}"
-          print(urlunsplit((parts.scheme, netloc, parts.path, "", "")))
-          PY
-          )"
+          AUTH_URL="$(python3 scripts/build-source-auth-url.py)"
           rm -rf source
-          git clone --depth 1 --branch "$SOURCE_REF" "$auth_url" source
+          git clone --depth 1 --branch "$SOURCE_REF" "$AUTH_URL" source
 
       - name: Setup Node
         uses: actions/setup-node@v4
