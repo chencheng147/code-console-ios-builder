@@ -62,7 +62,15 @@ gh repo create code-console-ios-builder --public --source . --remote origin --pu
 
 ## 3. 触发构建
 
-GitHub → Actions → `iOS TestFlight (public free builder)` → Run workflow。
+在业务仓 `mobile-app/` 一键触发（推荐）：
+
+```powershell
+cd C:\code\code-console\mobile-app
+npm run release:ios:github
+npm run release:ios:status
+```
+
+或本页 GitHub → Actions → `iOS TestFlight (public free builder)` → Run workflow。
 
 可指定 `source_ref`（默认 `main`）。
 
