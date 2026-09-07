@@ -1,0 +1,118 @@
+name: iOS TestFlight (public free builder)
+
+# This workflow is intended to live in a PUBLIC GitHub repository that contains
+# no business source. It clones the private product repo at build time, then
+# runs `eas build --local` on a macOS runner and submits the IPA to TestFlight.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Git ref to build from the private source repository
+        required: true
+        default: main
+        type: string
+
+concurrency:
+  group: ios-testflight-public-builder
+  cancel-in-progress: false
+
+jobs:
+  build-and-submit:
+    name: Clone private source, build IPA, submit TestFlight
+    runs-on: macos-14
+    timeout-minutes: 180
+
+    steps:
+      - name: Validate required secrets
+        env:
+          SOURCE_REPO_URL: ${{ secrets.SOURCE_REPO_URL }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_KEY_ISSUER_ID: ${{ secrets.ASC_API_KEY_ISSUER_ID }}
+        run: |
+          test -n "$SOURCE_REPO_URL"
+          test -n "$SOURCE_REPO_TOKEN"
+          test -n "$EXPO_TOKEN"
+          test -n "$ASC_API_KEY_P8"
+          test -n "$ASC_API_KEY_ID"
+          test -n "$ASC_API_KEY_ISSUER_ID"
+
+      - name: Clone private business source
+        env:
+          SOURCE_REPO_URL: ${{ secrets.SOURCE_REPO_URL }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          # Supports https://github.com/org/repo.git or https://gitee.com/org/repo.git
+          auth_url="$(python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit, urlunsplit
+          raw = os.environ["SOURCE_REPO_URL"].strip()
+          token = os.environ["SOURCE_REPO_TOKEN"].strip()
+          parts = urlsplit(raw)
+          if parts.scheme not in ("http", "https") or not parts.netloc or not parts.path:
+              raise SystemExit("SOURCE_REPO_URL must be an https git URL")
+          netloc = f"x-access-token:{token}@{parts.netloc}"
+          print(urlunsplit((parts.scheme, netloc, parts.path, "", "")))
+          PY
+          )"
+          rm -rf source
+          git clone --depth 1 --branch "$SOURCE_REF" "$auth_url" source
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: source/mobile-app/package-lock.json
+
+      - name: Setup Expo and EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: 20.5.1
+          token: ${{ secrets.EXPO_TOKEN }}
+          packager: npm
+
+      - name: Install dependencies
+        working-directory: source/mobile-app
+        run: npm ci
+
+      - name: Materialize App Store Connect API key
+        working-directory: source/mobile-app
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          mkdir -p .secrets
+          printf '%s' "$ASC_API_KEY_P8" > .secrets/AuthKey_KV696W6V28.p8
+          chmod 600 .secrets/AuthKey_KV696W6V28.p8
+
+      - name: Build iOS IPA with eas build --local
+        working-directory: source/mobile-app
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          mkdir -p dist/ios
+          npx --yes eas-cli@20.5.1 build --platform ios --profile production --local --non-interactive --output ./dist/ios/code-console-production.ipa
+
+      - name: Submit IPA to TestFlight
+        working-directory: source/mobile-app
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EXPO_ASC_API_KEY_PATH: ./.secrets/AuthKey_KV696W6V28.p8
+          EXPO_ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          EXPO_ASC_API_KEY_ISSUER_ID: ${{ secrets.ASC_API_KEY_ISSUER_ID }}
+        run: |
+          npx --yes eas-cli@20.5.1 submit --platform ios --profile production --path ./dist/ios/code-console-production.ipa --non-interactive --no-wait
+
+      - name: Upload IPA artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-console-ios-ipa
+          path: source/mobile-app/dist/ios/code-console-production.ipa
+          if-no-files-found: warn
+          retention-days: 7
