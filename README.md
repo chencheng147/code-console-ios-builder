@@ -4,7 +4,7 @@
 
 Secrets 清单见 `SECRETS.md`。一键建仓脚本见 `publish-public-builder.ps1`。
 
-构建时由 Actions 用只读 token 拉取私有源码仓（Gitee / GitHub Private 均可），在 `macos-14` 上执行：
+构建时由 Actions 用只读 token 拉取私有源码仓（Gitee / GitHub Private 均可），在 `macos-15`（Xcode ≥ 16.1，满足 RN 0.81）上执行：
 
 ```text
 eas build --platform ios --profile production --local
