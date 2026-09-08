@@ -1,0 +1,90 @@
+name: Diagnose ASC builds
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: List recent App Store Connect builds
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_KEY_ISSUER_ID: ${{ secrets.ASC_API_KEY_ISSUER_ID }}
+        run: |
+          python3 - <<'PY'
+          import os, time, json, base64, hashlib, urllib.request
+          from pathlib import Path
+          try:
+              from cryptography.hazmat.primitives import serialization, hashes
+              from cryptography.hazmat.primitives.asymmetric import ec
+          except ImportError:
+              import subprocess, sys
+              subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'cryptography', '-q'])
+              from cryptography.hazmat.primitives import serialization, hashes
+              from cryptography.hazmat.primitives.asymmetric import ec
+
+          key_id = os.environ['ASC_API_KEY_ID']
+          issuer = os.environ['ASC_API_KEY_ISSUER_ID']
+          p8 = os.environ['ASC_API_KEY_P8']
+          app_id = '6788596713'
+
+          def b64url(data: bytes) -> str:
+              return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
+
+          header = b64url(json.dumps({'alg':'ES256','kid':key_id,'typ':'JWT'}).encode())
+          now = int(time.time())
+          payload = b64url(json.dumps({'iss':issuer,'exp':now+1200,'aud':'appstoreconnect-v1'}).encode())
+          signing_input = f'{header}.{payload}'.encode()
+          key = serialization.load_pem_private_key(p8.encode(), password=None)
+          sig = key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+          # Convert DER to IEEE-P1363
+          from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+          r,s = decode_dss_signature(sig)
+          sig_p1363 = r.to_bytes(32,'big') + s.to_bytes(32,'big')
+          token = f'{header}.{payload}.{b64url(sig_p1363)}'
+
+          def get(path):
+              req = urllib.request.Request('https://api.appstoreconnect.apple.com'+path, headers={'Authorization': f'Bearer {token}'})
+              with urllib.request.urlopen(req) as resp:
+                  return json.load(resp)
+
+          builds = get(f'/v1/builds?filter[app]={app_id}&fields[builds]=version,uploadedDate,processingState,expired,usesNonExemptEncryption&include=preReleaseVersion&sort=-uploadedDate&limit=20')
+          rows=[]
+          pre={}
+          for inc in builds.get('included') or []:
+              if inc.get('type')=='preReleaseVersions':
+                  pre[inc['id']] = inc['attributes'].get('version')
+          for b in builds.get('data') or []:
+              rel = (b.get('relationships') or {}).get('preReleaseVersion', {}).get('data') or {}
+              rows.append({
+                'buildNumber': b['attributes']['version'],
+                'marketingVersion': pre.get(rel.get('id')),
+                'uploadedDate': b['attributes']['uploadedDate'],
+                'processingState': b['attributes']['processingState'],
+                'expired': b['attributes']['expired'],
+                'usesNonExemptEncryption': b['attributes'].get('usesNonExemptEncryption'),
+                'id': b['id'],
+              })
+          print('BUILDS')
+          print(json.dumps(rows, indent=2))
+          groups = get(f'/v1/apps/{app_id}/betaGroups?fields[betaGroups]=name,isInternalGroup,publicLinkEnabled,hasAccessToAllBuilds&limit=20')
+          print('GROUPS')
+          print(json.dumps([{
+            'name': g['attributes']['name'],
+            'isInternalGroup': g['attributes']['isInternalGroup'],
+            'publicLinkEnabled': g['attributes']['publicLinkEnabled'],
+            'hasAccessToAllBuilds': g['attributes'].get('hasAccessToAllBuilds'),
+            'id': g['id'],
+          } for g in groups.get('data') or []], indent=2))
+          # For each recent build, list assigned beta groups
+          for row in rows[:8]:
+              bid = row['id']
+              try:
+                  bg = get(f'/v1/builds/{bid}/betaGroups?fields[betaGroups]=name&limit=20')
+                  names=[g['attributes']['name'] for g in bg.get('data') or []]
+              except Exception as e:
+                  names=[f'ERR:{e}']
+              print(f"BUILD_{row['buildNumber']}_GROUPS", names)
+          PY
