@@ -1,0 +1,120 @@
+name: Submit existing IPA to TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: GitHub Actions run id that produced code-console-ios-ipa
+        required: true
+        default: "34175065345"
+        type: string
+      source_ref:
+        description: Private source ref for eas.json / project metadata
+        required: true
+        default: main
+        type: string
+
+concurrency:
+  group: ios-submit-existing-ipa
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    name: Re-submit IPA and wait for Apple
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Checkout builder scripts
+        uses: actions/checkout@v4
+
+      - name: Validate secrets
+        env:
+          SOURCE_REPO_URL: ${{ secrets.SOURCE_REPO_URL }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_KEY_ISSUER_ID: ${{ secrets.ASC_API_KEY_ISSUER_ID }}
+        run: |
+          test -n "$SOURCE_REPO_URL"
+          test -n "$SOURCE_REPO_TOKEN"
+          test -n "$EXPO_TOKEN"
+          test -n "$ASC_API_KEY_P8"
+          test -n "$ASC_API_KEY_ID"
+          test -n "$ASC_API_KEY_ISSUER_ID"
+
+      - name: Clone private business source
+        env:
+          SOURCE_REPO_URL: ${{ secrets.SOURCE_REPO_URL }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          AUTH_URL="$(python3 scripts/build-source-auth-url.py)"
+          git config --global http.version HTTP/1.1
+          git config --global http.postBuffer 524288000
+          attempt=1
+          max_attempts=5
+          until [ "$attempt" -gt "$max_attempts" ]; do
+            rm -rf source
+            if git clone --depth 1 --branch "$SOURCE_REF" "$AUTH_URL" source; then
+              exit 0
+            fi
+            echo "Clone attempt $attempt/$max_attempts failed; retrying..."
+            sleep $((attempt * 15))
+            attempt=$((attempt + 1))
+          done
+          exit 1
+
+      - name: Download IPA artifact from prior run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.artifact_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p source/mobile-app/dist/ios
+          gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -n code-console-ios-ipa -D source/mobile-app/dist/ios
+          test -f source/mobile-app/dist/ios/code-console-production.ipa
+          ls -lh source/mobile-app/dist/ios/code-console-production.ipa
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Expo and EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: 20.5.1
+          token: ${{ secrets.EXPO_TOKEN }}
+          packager: npm
+
+      - name: Materialize App Store Connect API key
+        working-directory: source/mobile-app
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          mkdir -p .secrets
+          printf '%s' "$ASC_API_KEY_P8" > .secrets/AuthKey_KV696W6V28.p8
+          chmod 600 .secrets/AuthKey_KV696W6V28.p8
+
+      - name: Submit IPA to TestFlight and wait
+        working-directory: source/mobile-app
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_KEY_ISSUER_ID: ${{ secrets.ASC_API_KEY_ISSUER_ID }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path("eas.json")
+          data = json.loads(path.read_text())
+          ios = data["submit"]["production"]["ios"]
+          ios["ascApiKeyPath"] = "./.secrets/AuthKey_KV696W6V28.p8"
+          ios["ascApiKeyId"] = os.environ["ASC_API_KEY_ID"]
+          ios["ascApiKeyIssuerId"] = os.environ["ASC_API_KEY_ISSUER_ID"]
+          path.write_text(json.dumps(data, indent=2) + "\n")
+          PY
+          # Wait so CI cannot go green on a merely "scheduled" submission.
+          npx --yes eas-cli@20.5.1 submit --platform ios --profile production --path ./dist/ios/code-console-production.ipa --non-interactive --wait
