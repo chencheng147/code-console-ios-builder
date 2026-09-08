@@ -1,0 +1,266 @@
+name: Diagnose Expo submission + resubmit
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: Run id with IPA artifact
+        required: true
+        default: "34175065345"
+      source_ref:
+        required: true
+        default: main
+      old_submission_id:
+        description: Previous Expo submission UUID to inspect
+        required: true
+        default: "452da950-fd48-458a-9a62-40be3fd503f6"
+
+concurrency:
+  group: ios-submit-existing-ipa
+  cancel-in-progress: true
+
+jobs:
+  diagnose-and-submit:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate secrets
+        env:
+          SOURCE_REPO_URL: ${{ secrets.SOURCE_REPO_URL }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_KEY_ISSUER_ID: ${{ secrets.ASC_API_KEY_ISSUER_ID }}
+        run: |
+          test -n "$SOURCE_REPO_URL" && test -n "$SOURCE_REPO_TOKEN" && test -n "$EXPO_TOKEN"
+          test -n "$ASC_API_KEY_P8" && test -n "$ASC_API_KEY_ID" && test -n "$ASC_API_KEY_ISSUER_ID"
+
+      - name: Inspect previous Expo submission status
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          SUB_ID: ${{ inputs.old_submission_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          token = os.environ["EXPO_TOKEN"]
+          sub_id = os.environ["SUB_ID"]
+          query = {
+            "query": """
+              query($id: ID!) {
+                submission { byId(id: $id) {
+                  id
+                  status
+                  platform
+                  createdAt
+                  updatedAt
+                  error { errorCode message }
+                  iosSubmission { ascAppIdentifier }
+                }}
+              }
+            """,
+            "variables": {"id": sub_id},
+          }
+          # Try modern + legacy field shapes
+          queries = [
+            {
+              "query": "query($id: ID!){ submissions{ byId(submissionId:$id){ id status platform createdAt updatedAt errorMessage } } }",
+              "variables": {"id": sub_id},
+            },
+            {
+              "query": "query($id: ID!){ submission{ byId(id:$id){ id status platform createdAt updatedAt } } }",
+              "variables": {"id": sub_id},
+            },
+          ]
+          for q in queries:
+            req = urllib.request.Request(
+              "https://api.expo.dev/graphql",
+              data=json.dumps(q).encode(),
+              headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+              },
+              method="POST",
+            )
+            try:
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                body = resp.read().decode()
+              print("QUERY_OK")
+              print(body[:4000])
+            except Exception as e:
+              print("QUERY_ERR", e)
+              if hasattr(e, 'read'):
+                print(e.read().decode()[:2000])
+          PY
+
+      - name: Clone private source
+        env:
+          SOURCE_REPO_URL: ${{ secrets.SOURCE_REPO_URL }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          AUTH_URL="$(python3 scripts/build-source-auth-url.py)"
+          git config --global http.version HTTP/1.1
+          git config --global http.postBuffer 524288000
+          rm -rf source
+          git clone --depth 1 --branch "$SOURCE_REF" "$AUTH_URL" source
+
+      - name: Download IPA artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.artifact_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p source/mobile-app/dist/ios
+          gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -n code-console-ios-ipa -D source/mobile-app/dist/ios
+          test -f source/mobile-app/dist/ios/code-console-production.ipa
+          ls -lh source/mobile-app/dist/ios/code-console-production.ipa
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: source/mobile-app/package-lock.json
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: 20.5.1
+          token: ${{ secrets.EXPO_TOKEN }}
+          packager: npm
+
+      - name: Install dependencies
+        working-directory: source/mobile-app
+        run: npm ci
+
+      - name: Materialize ASC key
+        working-directory: source/mobile-app
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          mkdir -p .secrets
+          printf '%s' "$ASC_API_KEY_P8" > .secrets/AuthKey_KV696W6V28.p8
+          chmod 600 .secrets/AuthKey_KV696W6V28.p8
+
+      - name: Submit IPA (no-wait) then poll Expo + ASC
+        working-directory: source/mobile-app
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_KEY_ISSUER_ID: ${{ secrets.ASC_API_KEY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path("eas.json")
+          data = json.loads(path.read_text())
+          ios = data["submit"]["production"]["ios"]
+          ios["ascApiKeyPath"] = "./.secrets/AuthKey_KV696W6V28.p8"
+          ios["ascApiKeyId"] = os.environ["ASC_API_KEY_ID"]
+          ios["ascApiKeyIssuerId"] = os.environ["ASC_API_KEY_ISSUER_ID"]
+          path.write_text(json.dumps(data, indent=2) + "\n")
+          PY
+
+          set +e
+          OUT=$(npx --yes eas-cli@20.5.1 submit --platform ios --profile production --path ./dist/ios/code-console-production.ipa --non-interactive --no-wait --verbose 2>&1)
+          CODE=$?
+          set -e
+          echo "$OUT"
+          echo "eas_submit_exit=$CODE"
+          test "$CODE" -eq 0
+
+          SUB_URL=$(echo "$OUT" | sed -n 's#.*https://expo.dev/accounts/[^/]*/projects/[^/]*/submissions/\([a-f0-9-]*\).*#\1#p' | tail -n1)
+          echo "parsed_submission_id=$SUB_URL"
+          test -n "$SUB_URL"
+
+          python3 - <<PY
+          import json, os, time, urllib.request, base64
+          from cryptography.hazmat.primitives import serialization, hashes
+          from cryptography.hazmat.primitives.asymmetric import ec
+          from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
+          token = os.environ["EXPO_TOKEN"]
+          sub_id = "$SUB_URL"
+          app_id = "6788596713"
+          key_id = os.environ["ASC_API_KEY_ID"]
+          issuer = os.environ["ASC_API_KEY_ISSUER_ID"]
+          p8 = os.environ["ASC_API_KEY_P8"]
+
+          def expo_status(sid):
+              q = {
+                "query": "query($id: ID!){ submissions{ byId(submissionId:$id){ id status createdAt updatedAt errorMessage } } }",
+                "variables": {"id": sid},
+              }
+              req = urllib.request.Request(
+                "https://api.expo.dev/graphql",
+                data=json.dumps(q).encode(),
+                headers={"Content-Type":"application/json","Authorization":f"Bearer {token}"},
+                method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  return json.load(resp)
+
+          def b64url(b):
+              return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+          def asc_token():
+              now=int(time.time())
+              header=b64url(json.dumps({"alg":"ES256","kid":key_id,"typ":"JWT"}).encode())
+              payload=b64url(json.dumps({"iss":issuer,"exp":now+1200,"aud":"appstoreconnect-v1"}).encode())
+              signing=f"{header}.{payload}".encode()
+              key=serialization.load_pem_private_key(p8.encode(), password=None)
+              sig=key.sign(signing, ec.ECDSA(hashes.SHA256()))
+              r,s=decode_dss_signature(sig)
+              return f"{header}.{payload}.{b64url(r.to_bytes(32,'big')+s.to_bytes(32,'big'))}"
+          def asc_latest():
+              req=urllib.request.Request(
+                f"https://api.appstoreconnect.apple.com/v1/builds?filter[app]={app_id}&fields[builds]=version,uploadedDate,processingState&sort=-uploadedDate&limit=5",
+                headers={"Authorization":f"Bearer {asc_token()}"},
+              )
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  data=json.load(resp)
+              return [{
+                "buildNumber": b["attributes"]["version"],
+                "processingState": b["attributes"]["processingState"],
+                "uploadedDate": b["attributes"]["uploadedDate"],
+              } for b in data.get("data") or []]
+
+          deadline = time.time() + 35*60
+          while time.time() < deadline:
+              try:
+                  st = expo_status(sub_id)
+                  print("EXPO", json.dumps(st)[:1500])
+              except Exception as e:
+                  print("EXPO_ERR", e)
+                  st = None
+              try:
+                  builds = asc_latest()
+                  print("ASC", json.dumps(builds))
+                  nums = [b["buildNumber"] for b in builds]
+                  if any(int(n) >= 75 for n in nums if str(n).isdigit()):
+                      print("SUCCESS_ASC_HAS_75_PLUS")
+                      raise SystemExit(0)
+              except SystemExit:
+                  raise
+              except Exception as e:
+                  print("ASC_ERR", e)
+              # detect terminal expo failure
+              try:
+                  node = (((st or {}).get("data") or {}).get("submissions") or {}).get("byId") or {}
+                  status = (node.get("status") or "").upper()
+                  if status in ("ERRORED", "FAILED", "CANCELED", "CANCELLED"):
+                      print("EXPO_TERMINAL_FAIL", status, node.get("errorMessage"))
+                      raise SystemExit(2)
+                  if status in ("FINISHED", "COMPLETE", "COMPLETED"):
+                      print("EXPO_FINISHED_WAIT_ASC")
+              except SystemExit:
+                  raise
+              except Exception:
+                  pass
+              time.sleep(30)
+          print("TIMEOUT waiting for ASC build >= 75")
+          raise SystemExit(1)
+          PY
