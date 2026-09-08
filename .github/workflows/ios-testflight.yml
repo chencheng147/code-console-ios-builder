@@ -51,8 +51,22 @@ jobs:
         run: |
           set -euo pipefail
           AUTH_URL="$(python3 scripts/build-source-auth-url.py)"
-          rm -rf source
-          git clone --depth 1 --branch "$SOURCE_REF" "$AUTH_URL" source
+          # Gitee HTTPS from GitHub-hosted runners can drop mid-transfer (curl 18 / early EOF).
+          git config --global http.version HTTP/1.1
+          git config --global http.postBuffer 524288000
+          attempt=1
+          max_attempts=5
+          until [ "$attempt" -gt "$max_attempts" ]; do
+            rm -rf source
+            if git clone --depth 1 --branch "$SOURCE_REF" "$AUTH_URL" source; then
+              exit 0
+            fi
+            echo "Clone attempt $attempt/$max_attempts failed; retrying in $((attempt * 15))s..."
+            sleep $((attempt * 15))
+            attempt=$((attempt + 1))
+          done
+          echo "Failed to clone private source after $max_attempts attempts"
+          exit 1
 
       - name: Setup Node
         uses: actions/setup-node@v4
