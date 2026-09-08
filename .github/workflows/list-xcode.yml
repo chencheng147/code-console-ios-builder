@@ -1,0 +1,20 @@
+name: List Xcode versions
+
+on:
+  workflow_dispatch:
+
+jobs:
+  list:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-14, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Show Xcode installs
+        run: |
+          echo "RUNNER_OS_IMAGE=${{ matrix.os }}"
+          ls /Applications | grep -i xcode || true
+          xcodebuild -version || true
+          ls /Applications/Xcode*.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs 2>/dev/null || true
+          system_profiler SPSoftwareDataType | head -n 20 || true
