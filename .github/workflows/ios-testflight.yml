@@ -125,7 +125,7 @@ jobs:
           ios["ascApiKeyIssuerId"] = os.environ["ASC_API_KEY_ISSUER_ID"]
           path.write_text(json.dumps(data, indent=2) + "\n")
           PY
-          npx --yes eas-cli@20.5.1 submit --platform ios --profile production --path ./dist/ios/code-console-production.ipa --non-interactive --no-wait
+          npx --yes eas-cli@20.5.1 submit --platform ios --profile production --path ./dist/ios/code-console-production.ipa --non-interactive --wait
 
       - name: Upload IPA artifact
         if: always()
