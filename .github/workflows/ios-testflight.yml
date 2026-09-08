@@ -20,7 +20,7 @@ concurrency:
 jobs:
   build-and-submit:
     name: Clone private source, build IPA, submit TestFlight
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 180
 
     steps:
@@ -67,6 +67,20 @@ jobs:
           done
           echo "Failed to clone private source after $max_attempts attempts"
           exit 1
+
+      - name: Select Xcode 26 (iOS 26 SDK required by App Store Connect)
+        run: |
+          ls /Applications | grep -i Xcode || true
+          if [ -d /Applications/Xcode_26.4.1.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.4.1.app
+          elif [ -d /Applications/Xcode_26.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.app
+          else
+            # macos-26 default should already be Xcode 26.x
+            xcodebuild -version
+          fi
+          xcodebuild -version
+          xcrun --show-sdk-version --sdk iphoneos
 
       - name: Setup Node
         uses: actions/setup-node@v4
