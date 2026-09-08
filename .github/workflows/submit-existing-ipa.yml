@@ -81,6 +81,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: source/mobile-app/package-lock.json
 
       - name: Setup Expo and EAS
         uses: expo/expo-github-action@v8
@@ -88,6 +90,10 @@ jobs:
           eas-version: 20.5.1
           token: ${{ secrets.EXPO_TOKEN }}
           packager: npm
+
+      - name: Install dependencies
+        working-directory: source/mobile-app
+        run: npm ci
 
       - name: Materialize App Store Connect API key
         working-directory: source/mobile-app
@@ -116,5 +122,4 @@ jobs:
           ios["ascApiKeyIssuerId"] = os.environ["ASC_API_KEY_ISSUER_ID"]
           path.write_text(json.dumps(data, indent=2) + "\n")
           PY
-          # Wait so CI cannot go green on a merely "scheduled" submission.
           npx --yes eas-cli@20.5.1 submit --platform ios --profile production --path ./dist/ios/code-console-production.ipa --non-interactive --wait
