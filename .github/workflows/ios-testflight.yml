@@ -107,10 +107,24 @@ jobs:
         working-directory: source/mobile-app
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-          EXPO_ASC_API_KEY_PATH: ./.secrets/AuthKey_KV696W6V28.p8
-          EXPO_ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
-          EXPO_ASC_API_KEY_ISSUER_ID: ${{ secrets.ASC_API_KEY_ISSUER_ID }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_KEY_ISSUER_ID: ${{ secrets.ASC_API_KEY_ISSUER_ID }}
         run: |
+          # eas.json hardcodes a Windows ASC key path. eas-cli@20.5.1 still prefers that
+          # absolute ascApiKeyPath over EXPO_ASC_API_KEY_PATH, so rewrite for the runner.
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("eas.json")
+          data = json.loads(path.read_text())
+          ios = data["submit"]["production"]["ios"]
+          ios["ascApiKeyPath"] = "./.secrets/AuthKey_KV696W6V28.p8"
+          ios["ascApiKeyId"] = os.environ["ASC_API_KEY_ID"]
+          ios["ascApiKeyIssuerId"] = os.environ["ASC_API_KEY_ISSUER_ID"]
+          path.write_text(json.dumps(data, indent=2) + "\n")
+          PY
           npx --yes eas-cli@20.5.1 submit --platform ios --profile production --path ./dist/ios/code-console-production.ipa --non-interactive --no-wait
 
       - name: Upload IPA artifact
