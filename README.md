@@ -4,11 +4,30 @@
 
 Secrets 清单见 `SECRETS.md`。一键建仓脚本见 `publish-public-builder.ps1`。
 
-构建时由 Actions 用只读 token 拉取私有源码仓（Gitee / GitHub Private 均可），在 `macos-15`（Xcode ≥ 16.1，满足 RN 0.81）上执行：
+构建时由 Actions 用只读 token 拉取私有源码仓（Gitee / GitHub Private 均可），在 **`macos-26`（Xcode 26 / iOS 26 SDK）** 上执行：
 
 ```text
 eas build --platform ios --profile production --local
-eas submit --path <ipa>
+eas submit --path <ipa> --wait
+```
+
+硬性约束：
+
+```text
+App Store Connect 拒收 iOS 18.x SDK 包；macos-15 默认 Xcode 16.4 不能打 TestFlight 生产包
+Submit 必须 --wait；Scheduled 不等于 Apple 已收包
+eas.json 的 Windows ASC 路径会在 submit 前改写成 runner 上的 .secrets/*.p8
+Gitee HTTPS 断流有 HTTP/1.1 + 最多 5 次重试
+```
+
+日常在业务仓 `mobile-app/` 一条龙：
+
+```powershell
+# 先确保私有仓远端已有要打包的提交
+git push origin main
+cd mobile-app
+npm run release:ios:github
+npm run release:ios:status
 ```
 
 这样：
@@ -74,6 +93,8 @@ npm run release:ios:status
 
 可指定 `source_ref`（默认 `main`）。
 
+验收：Actions 全绿（含 Submit `--wait`）且 App Store Connect 出现新 buildNumber。
+
 ## 4. 「无限次数」边界（必读）
 
 公仓 + `eas build --local` **可以大幅降低费用**，但不是合同上的无限保证：
@@ -81,7 +102,7 @@ npm run release:ios:status
 ```text
 GitHub 可随时调整公仓 Actions 政策
 重度占用可能触发滥用审查、限流或排队变慢
-macos runner 经常排队，单次 iOS 构建常要 30–90+ 分钟
+macos-26 runner 经常排队，单次 iOS 构建常要 30–90+ 分钟
 Expo 托管证书、Apple API、网络仍可能失败
 日志里可能出现源码片段——公仓日志对外可见，注意脱敏
 ```
